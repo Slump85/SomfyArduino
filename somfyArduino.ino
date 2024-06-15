@@ -39,7 +39,6 @@ Remote newRemotes [NUMBER_REMOTE] = {
 void BuildFrame(unsigned long remoteID, unsigned int rollingCode, byte *frame, byte button);
 void SendCommand(byte *frame, byte sync);
 
-
 void setup()
 {
   Serial.begin(115200);
@@ -78,60 +77,57 @@ void loop()
       delay(10);
     }
  
-    char serie = data[0];
- 
-    for (int i = 1; i < data.length(); i++)
-    {
-      char cRemotePosition = data[i];
-      
-      int remotePosition = cRemotePosition - '0';
-      Serial.print("Commande "); Serial.println(remotePosition);
- 
-      Remote remote = somfyControllers.remotes[remotePosition];
-      unsigned long remoteID = remote.remoteID;
-      unsigned int rollingCode = remote.rollingCode;
-      
-      Serial.println("");
-      if (serie == 'm')
-      {
-        Serial.println("Monte");
-        BuildFrame(remoteID, rollingCode, frame, HAUT);
-      }
-      else if (serie == 's')
-      {
-        Serial.println("Stop");
-        BuildFrame(remoteID, rollingCode, frame, STOP);
-      }
-      else if (serie == 'd')
-      {
-        Serial.println("Descend");
-        BuildFrame(remoteID, rollingCode, frame, BAS);
-      }
-      else if (serie == 'p')
-      {
-        Serial.println("Prog");
-        BuildFrame(remoteID, rollingCode, frame, PROG);
-      }
-      else
-      {
-        Serial.println("Code custom");
-        BuildFrame(remoteID, rollingCode, frame, serie);
-      }
-  
-      Serial.println("");
-      SendCommand(frame, 2);
-      for (int i = 0; i < 2; i++)
-      {
-        SendCommand(frame, 7);
-      }
-  
-      //Incrémente le compteur et le sauvegarde en mémoire
-      somfyControllers.remotes[remotePosition].rollingCode++;
-      EEPROM.put(EEPROM_ADDRESS, somfyControllers);
-    }
+    getData(data);
   }
 }
  
+void getData(String data) {
+
+  char serie = data[0];
+
+  for (int i = 1; i < data.length(); i++)
+  {
+    char cRemotePosition = data[i];
+    
+    int remotePosition = cRemotePosition - '0';
+    Serial.print("Commande "); Serial.println(remotePosition);
+    Remote remote = somfyControllers.remotes[remotePosition];
+    unsigned long remoteID = remote.remoteID;
+    unsigned int rollingCode = remote.rollingCode;
+    
+    Serial.println("");
+    if (serie == 'm') {
+      Serial.println("Monte");
+      BuildFrame(remoteID, rollingCode, frame, HAUT);
+    }
+    else if (serie == 's') {
+      Serial.println("Stop");
+      BuildFrame(remoteID, rollingCode, frame, STOP);
+    }
+    else if (serie == 'd') {
+      Serial.println("Descend");
+      BuildFrame(remoteID, rollingCode, frame, BAS);
+    }
+    else if (serie == 'p') {
+      Serial.println("Prog");
+      BuildFrame(remoteID, rollingCode, frame, PROG);
+    }
+    else {
+      Serial.println("Code custom");
+      BuildFrame(remoteID, rollingCode, frame, serie);
+    }
+
+    Serial.println("");
+    SendCommand(frame, 2);
+    for (int i = 0; i < 2; i++) {
+      SendCommand(frame, 7);
+    }
+
+    //Incrémente le compteur et le sauvegarde en mémoire
+    somfyControllers.remotes[remotePosition].rollingCode++;
+    EEPROM.put(EEPROM_ADDRESS, somfyControllers);
+  }
+}
  
 void BuildFrame(unsigned long remoteID, unsigned int rollingCode, byte *frame, byte button)
 {
