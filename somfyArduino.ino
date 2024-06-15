@@ -1,6 +1,9 @@
 #include <EEPROM.h>
-#define PORT_TX 5
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
 
+#define PORT_TX 5
 #define SYMBOL 640
 #define HAUT 0x2
 #define STOP 0x1
@@ -8,11 +11,28 @@
 #define PROG 0x8
 #define EEPROM_ADDRESS 0
 #define NUMBER_REMOTE 6
-
 #define VERSION 1
+#define PIN_LED_VERTE 5
+#define PIN_LED_ROUGE 14
+#define PIN_BP 4
+#define PIN_RELAY 13
 
 byte frame[7];
 byte checksum;
+
+const char * SSID = "Ckocinelle_Power_2G";
+const char * PASSWORD = "ckocinelle";
+
+static long t1;
+static long t2;
+static boolean OPEN = false;
+static boolean CLOSE = false;
+static unsigned long interval = 30000L;
+
+void onConnected(const WiFiEventStationModeConnected& event);
+void onGotIP(const WiFiEventStationModeGotIP& event);
+
+ESP8266WebServer webServer(80);
 
 struct Remote
 {
@@ -41,6 +61,48 @@ void SendCommand(byte *frame, byte sync);
 
 void setup()
 {
+  ////// SERVER
+    // Definition de la liaison serie
+    Serial.begin(115200L);
+    Serial.println(" ");
+
+    // Declaration du mode des pins
+    // pinMode(PIN_LED_VERTE, OUTPUT);
+    // pinMode(PIN_LED_ROUGE, OUTPUT);
+    // pinMode(PIN_RELAY, OUTPUT);
+    // pinMode(PIN_RELAY_2, INPUT);
+    // pinMode(PIN_BP, INPUT_PULLUP);
+
+    // // initialisation des positions
+    // digitalWrite(PIN_LED_VERTE, LOW);
+    // digitalWrite(PIN_LED_ROUGE, LOW);
+    // digitalWrite(PIN_RELAY,HIGH);
+
+    // Definition de l'adresse IP fixe
+    IPAddress ip(192,168,0,201);
+    IPAddress gateway(192,168,0,254);
+    IPAddress subnet(255,255,255,0);
+    IPAddress dns(192,168,0,254);
+
+    // Connexion WiFi
+    WiFi.mode(WIFI_STA);
+    WiFi.softAP("somfyByArduino");
+    WiFi.config(ip,gateway,subnet,dns);
+    WiFi.begin(SSID,PASSWORD);
+    static WiFiEventHandler onConnectedHandler = WiFi.onStationModeConnected(onConnected);
+    static WiFiEventHandler onGotIPHandler = WiFi.onStationModeGotIP(onGotIP);
+
+    // Demerrage et mise en place de serveur web
+    webServer.on("/storebane/led/on",setLedOn);
+    webServer.on("/storebane/led/off",setLedOff);
+    webServer.on("/storebane/led/",getLed);
+    webServer.on("/storebane/relay/",getRelay);
+    // webServer.on("/storebane/led/tempo",setLedTemp);
+    webServer.on("/",handleRoot);
+    webServer.enableCORS(true);
+    webServer.begin();
+
+  ////// SOMFY
   Serial.begin(115200);
   DDRD |= 1<<PORT_TX;
   PORTD &= !(1<<PORT_TX);
@@ -66,6 +128,13 @@ void setup()
  
 void loop()
 {
+    // test connection wifi
+    if(WiFi.isConnected()){
+        digitalWrite(PIN_LED_ROUGE, HIGH);
+        webServer.handleClient();
+    } else {
+        digitalWrite(PIN_LED_ROUGE, LOW);
+    }
   if (Serial.available())
   {
     String data = "";
@@ -230,4 +299,59 @@ void SendCommand(byte *frame, byte sync)
 
   PORTD &= !(1<<PORT_TX);
   delayMicroseconds(30415);
+}
+
+void onConnected(const WiFiEventStationModeConnected& event){
+    Serial.println("Wifi connecte");
+}
+
+void onGotIP(const WiFiEventStationModeGotIP& event){
+    Serial.println("Adresse IP : "+WiFi.localIP().toString());
+    Serial.println("Adresse IP Passerelle : "+WiFi.gatewayIP().toString());
+    Serial.println("Adresse IP DNS : "+WiFi.dnsIP().toString());
+    Serial.print("Puissance du signal : ");
+    Serial.println(WiFi.RSSI());
+}
+
+void handleRoot(){
+    String reponse = "That's work.";
+    sendResponse(reponse);
+}
+
+void getLed(){
+    sendResponse((String)digitalRead(PIN_LED_VERTE));
+}
+
+void getRelay(){
+    // sendResponse((String)digitalRead(PIN_RELAY_2));
+}
+
+void setLedOn(){
+    digitalWrite(PIN_LED_VERTE, HIGH);
+    digitalWrite(PIN_RELAY,LOW);
+    t1=millis();
+    Serial.println("t1: "+ (String)t1 + "ms");
+    sendResponse("1");
+}
+
+void setLedOff(){
+    digitalWrite(PIN_LED_VERTE, LOW);
+    digitalWrite(PIN_RELAY,HIGH);
+    Serial.println("t2: "+ (String)t2 + "ms");
+    OPEN=false;
+    sendResponse("0");
+}
+
+// void setLedTemp(){
+//     t1=0L;
+//     t2=0L;
+//     setLedOn();
+//     OPEN=true;
+// }
+
+void sendResponse(String value){
+    webServer.sendHeader("Access-Control-Max-Age", "10000");
+    webServer.sendHeader("Access-Control-Allow-Methods", "PUT,POST,GET,OPTIONS");
+    webServer.sendHeader("Access-Control-Allow-Headers", "*");
+    webServer.send(200,"text/plain",value);
 }
