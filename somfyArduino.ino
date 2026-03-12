@@ -2,6 +2,7 @@
 #include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266HTTPUpdateServer.h>
 #include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <time.h>
@@ -210,6 +211,7 @@ struct Persist {
 // =====================
 Persist somfy;
 ESP8266WebServer server(8090);
+ESP8266HTTPUpdateServer httpUpdater;
 
 // Anti-double-déclenchement des scènes (timestamp en minutes)
 static uint32_t lastFiredMinute[NB_SCENES];
@@ -871,29 +873,48 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Somfy RTS - Volets</title>
 <style>
-body{font-family:system-ui,Arial;margin:16px;max-width:960px}
-.card{border:1px solid #ddd;border-radius:10px;padding:12px;margin:10px 0}
-.row{display:flex;gap:8px;flex-wrap:wrap}
-button{padding:10px 12px;border-radius:8px;border:1px solid #bbb;background:#f7f7f7;cursor:pointer}
-button:active{transform:translateY(1px)}
+*{box-sizing:border-box}
+body{font-family:system-ui,Arial;margin:0 auto;padding:12px;max-width:960px}
+h1{font-size:1.25em;margin:0 0 6px}
+h2{font-size:1.05em;margin:14px 0 8px;color:#444}
+.card{border:1px solid #ddd;border-radius:10px;padding:12px;margin:8px 0}
+button{padding:12px 14px;border-radius:8px;border:1px solid #bbb;background:#f7f7f7;cursor:pointer;font-size:1em;min-height:44px;touch-action:manipulation;width:100%}
+button:active{opacity:.7}
 button.danger{background:#fee;border-color:#f99}
-button.small{padding:5px 8px;font-size:0.85em}
-small{color:#555}
-table{border-collapse:collapse;width:100%}
-td,th{border:1px solid #ddd;padding:6px 10px;text-align:left}
-th{background:#f5f5f5}
-select,input[type=number],input[type=time],input[type=text]{padding:6px;border-radius:6px;border:1px solid #bbb}
-.form-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+button.small{padding:6px 10px;font-size:.85em;min-height:36px;width:auto}
+button.up{background:#d4edda;border-color:#82c896}
+button.stop{background:#fff3cd;border-color:#f0c040}
+button.down{background:#f8d7da;border-color:#e08080}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));gap:8px;margin:8px 0}
+.form-row{display:flex;flex-direction:column;gap:8px;margin:8px 0}
+.form-row label{display:flex;flex-direction:column;gap:3px;font-size:.9em;font-weight:500}
+select,input[type=number],input[type=time],input[type=text]{padding:9px 8px;border-radius:6px;border:1px solid #bbb;font-size:1em;width:100%}
+.days-wrap{display:flex;flex-wrap:wrap;gap:6px 14px;margin:4px 0}
+.days-wrap label{display:flex;align-items:center;gap:4px;font-size:.9em;cursor:pointer;font-weight:normal}
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:8px 0}
+table{border-collapse:collapse;min-width:460px;width:100%}
+td,th{border:1px solid #ddd;padding:7px 8px;text-align:left;white-space:nowrap}
+th{background:#f5f5f5;font-size:.85em}
+.cfg-name{min-width:90px}
+.cfg-num{width:52px!important}
+#meta{font-size:.8em;color:#555;line-height:1.9;margin:2px 0 8px}
+small{color:#555;font-size:.82em}
 hr{border:none;border-top:1px solid #eee;margin:12px 0}
-.tabs{display:flex;gap:0;margin:12px 0 0}
-.tab-btn{padding:8px 18px;border:1px solid #bbb;border-bottom:none;background:#f5f5f5;cursor:pointer;border-radius:6px 6px 0 0;font-size:.95em}
+.tabs{display:flex;gap:0;margin:10px 0 0}
+.tab-btn{flex:1;padding:10px 6px;border:1px solid #bbb;border-bottom:none;background:#f0f0f0;cursor:pointer;border-radius:6px 6px 0 0;font-size:.95em;text-align:center;min-height:44px;width:auto}
 .tab-btn.active{background:#fff;font-weight:bold;position:relative;margin-bottom:-1px;border-bottom:1px solid #fff}
 .tab-pane{display:none;border:1px solid #bbb;border-radius:0 6px 6px 6px;padding:12px}
 .tab-pane.active{display:block}
+@media(min-width:580px){
+  button{width:auto}
+  .form-row{flex-direction:row;flex-wrap:wrap;align-items:flex-end}
+  .form-row label{flex-direction:column}
+  select,input[type=number],input[type=time],input[type=text]{width:auto}
+}
 </style></head><body>
 <h1>Somfy RTS - Multi-volets</h1>
 <div id="meta"><small>Chargement…</small></div>
-<div style="margin:4px 0"><button id="btn-led" onclick="toggleLed()" style="padding:4px 10px;font-size:0.85em">LED fonct. &#9679;</button></div>
+<div style="margin:4px 0;display:flex;justify-content:flex-start;align-items:center;gap:8px"><button id="btn-led" onclick="toggleLed()" style="padding:4px 10px;font-size:0.85em;width:auto;min-height:0">LED fonct. &#9679;</button><button onclick="location.href='/update'" style="padding:4px 10px;font-size:0.85em;width:auto;min-height:0">&#11014; Firmware</button></div>
 
 <div class="tabs">
   <button class="tab-btn active" onclick="showTab('usage')">Utilisation</button>
@@ -919,24 +940,22 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
       </select>
     </label>
     <span id="sc-time-wrap"><label>Heure <input type="time" id="sc-time" value="08:00"></label></span>
-    <label>Décalage (min) <input type="number" id="sc-offset" value="0" min="-127" max="127" style="width:70px"></label>
+    <label>Décalage (min) <input type="number" id="sc-offset" value="0" min="-127" max="127"></label>
   </div>
-  <div class="form-row">
-    <span>
-      <label><input type="checkbox" class="dc" value="1"> Lun</label>
-      <label><input type="checkbox" class="dc" value="2"> Mar</label>
-      <label><input type="checkbox" class="dc" value="4"> Mer</label>
-      <label><input type="checkbox" class="dc" value="8"> Jeu</label>
-      <label><input type="checkbox" class="dc" value="16"> Ven</label>
-      <label><input type="checkbox" class="dc" value="32"> Sam</label>
-      <label><input type="checkbox" class="dc" value="64"> Dim</label>
-    </span>
+  <div class="days-wrap">
+    <label><input type="checkbox" class="dc" value="1"> Lun</label>
+    <label><input type="checkbox" class="dc" value="2"> Mar</label>
+    <label><input type="checkbox" class="dc" value="4"> Mer</label>
+    <label><input type="checkbox" class="dc" value="8"> Jeu</label>
+    <label><input type="checkbox" class="dc" value="16"> Ven</label>
+    <label><input type="checkbox" class="dc" value="32"> Sam</label>
+    <label><input type="checkbox" class="dc" value="64"> Dim</label>
   </div>
   <div class="form-row">
     <label>Type <select id="sc-type" onchange="updateTargetList()"><option value="0">Volet</option><option value="1">Groupe</option></select></label>
     <label>Cible <select id="sc-target"></select></label>
     <label>Commande <select id="sc-cmd"><option value="up">Monter</option><option value="down">Descendre</option><option value="stop">Stop</option></select></label>
-    <label>Slot (0-7) <input type="number" id="sc-id" min="0" max="7" value="0" style="width:60px"></label>
+    <label>Slot (0-7) <input type="number" id="sc-id" min="0" max="7" value="0"></label>
     <button onclick="saveScene()">Enregistrer</button>
   </div>
 </div>
@@ -951,9 +970,9 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
   <hr>
   <b>Nouveau / modifier volet</b>
   <div class="form-row">
-    <label>Slot (0-7) <input type="number" id="vc-id" min="0" max="7" value="0" style="width:60px"></label>
-    <label>Nom <input type="text" id="vc-name" maxlength="19" style="width:150px" placeholder="ex: Salon"></label>
-    <label>Remote (0-15) <input type="number" id="vc-remote" min="0" max="15" value="0" style="width:60px"></label>
+    <label>Slot (0-7) <input type="number" id="vc-id" min="0" max="7" value="0"></label>
+    <label>Nom <input type="text" id="vc-name" maxlength="19" placeholder="ex: Salon"></label>
+    <label>Remote (0-15) <input type="number" id="vc-remote" min="0" max="15" value="0"></label>
     <button onclick="saveVoletConfig()">Enregistrer</button>
   </div>
 </div>
@@ -964,8 +983,8 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
   <hr>
   <b>Nouveau / modifier groupe</b>
   <div class="form-row">
-    <label>Slot (0-5) <input type="number" id="gc-id" min="0" max="5" value="0" style="width:60px"></label>
-    <label>Nom <input type="text" id="gc-name" maxlength="19" style="width:150px" placeholder="ex: Chambres"></label>
+    <label>Slot (0-5) <input type="number" id="gc-id" min="0" max="5" value="0"></label>
+    <label>Nom <input type="text" id="gc-name" maxlength="19" placeholder="ex: Chambres"></label>
   </div>
   <div class="form-row" id="gc-members"><small>Chargement volets…</small></div>
   <div class="form-row">
@@ -1053,7 +1072,7 @@ async function refreshScenes(){
     html+=`<tr><td>${s.id}</td><td>${triggerStr(s)}</td><td>${daysStr(s.days)}</td><td>${ttype}: ${tname}</td><td>${cname}</td><td><button class="danger small" onclick="deleteScene(${s.id})">Supprimer</button></td></tr>`;
   });
   html+="</table>";
-  div.innerHTML=html;
+  div.innerHTML="<div class='tbl-wrap'>"+html+"</div>";
 }
 
 // ---- Configuration volets ----
@@ -1096,33 +1115,32 @@ async function refreshConfig(){
   vc.volets.forEach(v=>{
     html+=`<tr>
       <td>${v.id}</td>
-      <td><input type="text" value="${v.name}" id="vn-${v.id}" maxlength="19" style="width:130px"></td>
-      <td><input type="number" value="${v.remoteIndex}" id="vr-${v.id}" min="0" max="15" style="width:55px"></td>
+      <td><input type="text" value="${v.name}" id="vn-${v.id}" maxlength="19" class="cfg-name"></td>
+      <td><input type="number" value="${v.remoteIndex}" id="vr-${v.id}" min="0" max="15" class="cfg-num"></td>
       <td>${v.enabled?"✓":"—"}</td>
-      <td style="white-space:nowrap">
+      <td>
         <button class="small" onclick="saveVoletSlot(${v.id})">Sauver</button>
         ${v.enabled?`<button class="danger small" onclick="deleteVoletConfig(${v.id})">Suppr.</button>`:""}
       </td></tr>`;
   });
   html+="</table>";
-  document.getElementById("volets-config").innerHTML=html;
+  document.getElementById("volets-config").innerHTML="<div class='tbl-wrap'>"+html+"</div>";
 
   // Table groupes config
   html="<table><tr><th>Slot</th><th>Nom</th><th>Membres (volets actifs)</th><th>Actif</th><th></th></tr>";
   gc.groupes.forEach(g=>{
-    const vmap=Object.fromEntries(statusData.volets.map(v=>[v.id,v.name]));
     const memberNames=statusData.volets.filter(v=>g.members&(1<<v.id)).map(v=>v.name).join(", ")||"—";
     html+=`<tr>
       <td>${g.id}</td>
       <td>${g.name}</td>
       <td>${memberNames}</td>
       <td>${g.enabled?"✓":"—"}</td>
-      <td style="white-space:nowrap">
+      <td>
         ${g.enabled?`<button class="danger small" onclick="deleteGroupeConfig(${g.id})">Suppr.</button>`:""}
       </td></tr>`;
   });
   html+="</table>";
-  document.getElementById("groupes-config").innerHTML=html;
+  document.getElementById("groupes-config").innerHTML="<div class='tbl-wrap'>"+html+"</div>";
 
   // Checkboxes membres groupe (volets actifs)
   const membersDiv=document.getElementById("gc-members");
@@ -1164,9 +1182,9 @@ async function refresh(){
   st.groupes.forEach(gr=>{
     const c=card("Groupe #"+gr.id+" — "+gr.name);
     const r=document.createElement("div"); r.className="row";
-    r.appendChild(btn("Monter",   ()=>api("/api/groupe?id="+gr.id+"&cmd=up")));
-    r.appendChild(btn("Stop",     ()=>api("/api/groupe?id="+gr.id+"&cmd=stop")));
-    r.appendChild(btn("Descendre",()=>api("/api/groupe?id="+gr.id+"&cmd=down")));
+    r.appendChild(btn("Monter",   ()=>api("/api/groupe?id="+gr.id+"&cmd=up"),   "up"));
+    r.appendChild(btn("Stop",     ()=>api("/api/groupe?id="+gr.id+"&cmd=stop"), "stop"));
+    r.appendChild(btn("Descendre",()=>api("/api/groupe?id="+gr.id+"&cmd=down"), "down"));
     c.appendChild(r);
     c.appendChild(document.createElement("div")).innerHTML=
       "<small>Membres: "+gr.members.join(", ")+"</small>";
@@ -1177,9 +1195,9 @@ async function refresh(){
   st.volets.forEach(vo=>{
     const c=card("Volet #"+vo.id+" — "+vo.name);
     const r=document.createElement("div"); r.className="row";
-    r.appendChild(btn("Monter",   ()=>api("/api/volet?id="+vo.id+"&cmd=up")));
-    r.appendChild(btn("Stop/MY",  ()=>api("/api/volet?id="+vo.id+"&cmd=stop")));
-    r.appendChild(btn("Descendre",()=>api("/api/volet?id="+vo.id+"&cmd=down")));
+    r.appendChild(btn("Monter",   ()=>api("/api/volet?id="+vo.id+"&cmd=up"),   "up"));
+    r.appendChild(btn("Stop/MY",  ()=>api("/api/volet?id="+vo.id+"&cmd=stop"), "stop"));
+    r.appendChild(btn("Descendre",()=>api("/api/volet?id="+vo.id+"&cmd=down"), "down"));
     r.appendChild(btn("Prog", async ()=>{
       if(confirm("Confirmer PROG pour '"+vo.name+"' ?"))
         await api("/api/volet?id="+vo.id+"&cmd=prog");
@@ -1512,6 +1530,7 @@ static void initServer() {
   server.onNotFound([](){
     server.send(404, "application/json", "{\"ok\":false,\"error\":\"not found\"}");
   });
+  httpUpdater.setup(&server, "/update", "admin", OTA_PASSWORD);
   server.begin();
   LOGLN(F("HTTP server started"));
 }
