@@ -5,6 +5,7 @@
 #include <ESP8266HTTPUpdateServer.h>
 #include <DNSServer.h>
 #include <ArduinoOTA.h>
+#include <Ticker.h>
 #include <time.h>
 
 // =====================
@@ -25,7 +26,7 @@
 // =====================
 // Configuration OTA
 // =====================
-#define OTA_HOSTNAME  "somfy-rts"
+#define OTA_HOSTNAME  "admin"
 #define OTA_PASSWORD  "somfy1234"
 
 // =====================
@@ -107,7 +108,19 @@ LEDState ledPower = {LED_POWER_PIN, 0, 0, false, false};
 LEDState ledUp    = {LED_UP_PIN,    0, 0, false, false};
 LEDState ledDown  = {LED_DOWN_PIN,  0, 0, false, false};
 
-static bool ledPowerEnabled = true;
+static bool   ledPowerEnabled = true;
+static Ticker otaLedTicker;
+static uint8_t otaLedStep = 0;
+
+static void otaLedTick() {
+  digitalWrite(LED_POWER_PIN, LOW);
+  digitalWrite(LED_UP_PIN,    LOW);
+  digitalWrite(LED_DOWN_PIN,  LOW);
+  if      (otaLedStep == 0) digitalWrite(LED_POWER_PIN, HIGH);
+  else if (otaLedStep == 1) digitalWrite(LED_UP_PIN,    HIGH);
+  else                      digitalWrite(LED_DOWN_PIN,  HIGH);
+  otaLedStep = (otaLedStep + 1) % 3;
+}
 
 static void initLEDs() {
   pinMode(LED_POWER_PIN, OUTPUT);
@@ -671,6 +684,19 @@ static void handleGroupe() {
   server.send(200, "application/json", out);
 }
 
+static uint32_t generateUniqueRemoteID() {
+  uint32_t id;
+  bool collision;
+  do {
+    id = (uint32_t)random(0x100000L, 0xFFFFFEL);
+    collision = false;
+    for (uint8_t i = 0; i < 16; i++) {
+      if (somfy.remotes[i].remoteID == id) { collision = true; break; }
+    }
+  } while (collision);
+  return id;
+}
+
 static void handleVoletConfig() {
   if (!ensureAuth()) return;
 
@@ -678,7 +704,17 @@ static void handleVoletConfig() {
     if (!server.hasArg("id")) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing id\"}"); return; }
     int id = server.arg("id").toInt();
     if (id < 0 || id >= MAX_VOLETS) { server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
+    uint8_t ri = somfy.volets[id].remoteIndex;
     somfy.volets[id].enabled = 0;
+    bool inUse = false;
+    for (uint8_t i = 0; i < MAX_VOLETS; i++) {
+      if (i == (uint8_t)id) continue;
+      if (somfy.volets[i].enabled && somfy.volets[i].remoteIndex == ri) { inUse = true; break; }
+    }
+    if (!inUse) {
+      somfy.remotes[ri].remoteID    = 0;
+      somfy.remotes[ri].rollingCode = 0;
+    }
     EEPROM.put(EEPROM_ADDRESS, somfy); EEPROM.commit();
     server.send(200, "application/json", "{\"ok\":true}");
     return;
@@ -711,7 +747,14 @@ static void handleVoletConfig() {
     strncpy(v.name, server.arg("name").c_str(), NAME_LEN - 1);
     v.name[NAME_LEN - 1] = '\0';
   }
-  if (server.hasArg("remoteIndex")) v.remoteIndex = (uint8_t)constrain(server.arg("remoteIndex").toInt(), 0, 15);
+  if (server.hasArg("remoteIndex")) {
+    uint8_t ri = (uint8_t)constrain(server.arg("remoteIndex").toInt(), 0, 15);
+    v.remoteIndex = ri;
+    if (somfy.remotes[ri].remoteID == 0 || somfy.remotes[ri].remoteID == 0xFFFFFFFFu) {
+      somfy.remotes[ri].remoteID    = generateUniqueRemoteID();
+      somfy.remotes[ri].rollingCode = 0;
+    }
+  }
   if (server.hasArg("enabled"))     v.enabled     = (server.arg("enabled") == "1") ? 1 : 0;
 
   EEPROM.put(EEPROM_ADDRESS, somfy); EEPROM.commit();
@@ -1154,6 +1197,19 @@ async function refreshConfig(){
       membersDiv.appendChild(lbl);
     });
   }
+
+  // Pré-remplir le formulaire avec le prochain slot et remoteIndex libres
+  const nextSlot=vc.volets.findIndex(v=>!v.enabled);
+  if(nextSlot>=0) document.getElementById("vc-id").value=nextSlot;
+  const usedRemotes=new Set(vc.volets.filter(v=>v.enabled).map(v=>v.remoteIndex));
+  let nextRemote=0;
+  while(usedRemotes.has(nextRemote)&&nextRemote<15) nextRemote++;
+  document.getElementById("vc-remote").value=nextRemote;
+  const nextGroupSlot=gc.groupes.findIndex(g=>!g.enabled);
+  if(nextGroupSlot>=0) document.getElementById("gc-id").value=nextGroupSlot;
+  document.getElementById("vc-name").value="";
+  document.getElementById("gc-name").value="";
+  document.querySelectorAll(".gm").forEach(c=>c.checked=false);
 }
 
 async function saveVoletSlot(id){
@@ -1228,6 +1284,7 @@ refresh();
 
 static void handleIndex() {
   if (!ensureAuth()) return;
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "text/html; charset=utf-8", FPSTR(PAGE_INDEX));
 }
 
@@ -1398,12 +1455,10 @@ static void initEEPROM() {
     somfy.appVersion = VERSION;
     fixupEEPROM();
 
-    somfy.remotes[0].remoteID = 0x5A7B2C;  // Salon
-    somfy.remotes[1].remoteID = 0xC3E916;  // Cuisine
-    somfy.remotes[2].remoteID = 0x2F4D8A;  // Chambre Charles
-    somfy.remotes[3].remoteID = 0xD6F541;  // Chambre Louis
-    somfy.remotes[4].remoteID = 0x8A1BE7;  // Chambre Parent
-    somfy.remotes[5].remoteID = 0x47C36D;  // Salle de bain
+    for (uint8_t i = 0; i < 6; i++) {
+      somfy.remotes[i].remoteID    = generateUniqueRemoteID();
+      somfy.remotes[i].rollingCode = 0;
+    }
 
     for (uint8_t i = 0; i < NB_SCENES; i++) {
       somfy.scenes[i] = {0, 0, 0, 0, 0, STOP, 0, 0, 0};
@@ -1530,7 +1585,7 @@ static void initServer() {
   server.onNotFound([](){
     server.send(404, "application/json", "{\"ok\":false,\"error\":\"not found\"}");
   });
-  httpUpdater.setup(&server, "/update", "admin", OTA_PASSWORD);
+  httpUpdater.setup(&server, "/update", OTA_HOSTNAME, OTA_PASSWORD);
   server.begin();
   LOGLN(F("HTTP server started"));
 }
@@ -1544,6 +1599,7 @@ void setup() {
 
   initLEDs();
   initEEPROM();
+  randomSeed(analogRead(A0) ^ ESP.getChipId() ^ millis());
   initRadioPin();
   initWiFi();
   initOTA();
@@ -1551,6 +1607,15 @@ void setup() {
   initServer();
 
   memset(lastFiredMinute, 0xFF, sizeof(lastFiredMinute));
+
+  // LEDs séquentielles pendant mise à jour firmware HTTP (/update)
+  // Le Ticker démarre au 1er appel onProgress et tourne via interruption matérielle
+  Update.onProgress([](size_t done, size_t total) {
+    if (!otaLedTicker.active()) {
+      otaLedStep = 0;
+      otaLedTicker.attach_ms(200, otaLedTick);
+    }
+  });
 }
 
 void loop() {
