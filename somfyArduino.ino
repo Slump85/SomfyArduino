@@ -21,7 +21,7 @@
 
 #define EEPROM_ADDRESS 0
 #define EEPROM_SIZE 1024
-#define VERSION 6
+#define VERSION 7
 
 // =====================
 // Configuration OTA
@@ -64,8 +64,8 @@
 // =====================
 // Configuration Volets/Groupes
 // =====================
-#define MAX_VOLETS   8
-#define MAX_GROUPES  6
+#define MAX_VOLETS  10
+#define MAX_GROUPES 10
 #define NAME_LEN    20   // 19 chars utiles + '\0'
 
 // Log minimal (0 = muet)
@@ -212,14 +212,14 @@ struct Persist {
   int          appVersion;           //   4 bytes
   Remote       remotes[16];          //  96 bytes
   Scene        scenes[NB_SCENES];    //  72 bytes
-  VoletConfig  volets[MAX_VOLETS];   // 176 bytes
-  GroupeConfig groupes[MAX_GROUPES]; // 138 bytes
+  VoletConfig  volets[MAX_VOLETS];   // 220 bytes (10×22)
+  GroupeConfig groupes[MAX_GROUPES]; // 230 bytes (10×23)
   char         wifiSSID[33];         //  33 bytes
   char         wifiPass[64];         //  64 bytes
   float        latitude;             //   4 bytes
   float        longitude;            //   4 bytes
   char         ville[32];            //  32 bytes
-  // Total : 623 bytes (< 1024)
+  // Total : 759 bytes (< 1024)
 };
 
 // =====================
@@ -804,7 +804,7 @@ static void handleGroupeConfig() {
     strncpy(g.name, server.arg("name").c_str(), NAME_LEN - 1);
     g.name[NAME_LEN - 1] = '\0';
   }
-  if (server.hasArg("members")) g.members = (uint16_t)(server.arg("members").toInt() & 0xFF);
+  if (server.hasArg("members")) g.members = (uint16_t)(server.arg("members").toInt() & 0x3FF); // 10 bits pour 10 volets
   if (server.hasArg("enabled")) g.enabled = (server.arg("enabled") == "1") ? 1 : 0;
 
   EEPROM.put(EEPROM_ADDRESS, somfy); EEPROM.commit();
@@ -1038,7 +1038,7 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
   <hr>
   <b>Nouveau / modifier volet</b>
   <div class="form-row">
-    <label>Slot (0-7) <input type="number" id="vc-id" min="0" max="7" value="0"></label>
+    <label>Slot (0-9) <input type="number" id="vc-id" min="0" max="9" value="0"></label>
     <label>Nom <input type="text" id="vc-name" maxlength="19" placeholder="ex: Salon"></label>
     <label>Remote (0-15) <input type="number" id="vc-remote" min="0" max="15" value="0"></label>
     <button onclick="saveVoletConfig()">Enregistrer</button>
@@ -1051,7 +1051,7 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
   <hr>
   <b>Nouveau / modifier groupe</b>
   <div class="form-row">
-    <label>Slot (0-5) <input type="number" id="gc-id" min="0" max="5" value="0"></label>
+    <label>Slot (0-9) <input type="number" id="gc-id" min="0" max="9" value="0"></label>
     <label>Nom <input type="text" id="gc-name" maxlength="19" placeholder="ex: Chambres"></label>
   </div>
   <div class="form-row" id="gc-members"><small>Chargement volets…</small></div>
@@ -1528,9 +1528,50 @@ static void initEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(EEPROM_ADDRESS, somfy);
 
-  if (somfy.appVersion == 5) {
-    // Migration VERSION 5 → 6 : ajout latitude/longitude/ville en EEPROM
-    LOGLN(F("EEPROM migration v5->v6"));
+  // Anciens offsets EEPROM (v4/v5/v6 : volets[8] puis groupes[6])
+  // volets  : offset 172 (8×22 = 176 bytes) — même offset en v7, volets[0..7] OK
+  // groupes : offset 348 (6×23 = 138 bytes)
+  // wifiSSID: offset 486 (33 bytes)  — présent dès v5
+  // wifiPass: offset 519 (64 bytes)  — présent dès v5
+  // latitude: offset 583 (4 bytes)   — présent dès v6
+  // longitude:offset 587 (4 bytes)   — présent dès v6
+  // ville   : offset 591 (32 bytes)  — présent dès v6
+  static const int OLD_GROUPES_OFS  = 4 + 96 + 72 + 8*22;          // 348
+  static const int OLD_WIFI_OFS     = OLD_GROUPES_OFS + 6*23;       // 486
+  static const int OLD_WIFI_PASS_OFS= OLD_WIFI_OFS + 33;            // 519
+  static const int OLD_LAT_OFS      = OLD_WIFI_PASS_OFS + 64;       // 583
+
+  if (somfy.appVersion == 6) {
+    // Migration VERSION 6 → 7 : MAX_VOLETS 8→10, MAX_GROUPES 6→10
+    // Les offsets EEPROM de groupes/wifi/localisation ont changé → relecture directe
+    LOGLN(F("EEPROM migration v6->v7"));
+    memset(&somfy.volets[8], 0, sizeof(VoletConfig));
+    memset(&somfy.volets[9], 0, sizeof(VoletConfig));
+    for (uint8_t i = 0; i < 6; i++)
+      EEPROM.get(OLD_GROUPES_OFS + i * (int)sizeof(GroupeConfig), somfy.groupes[i]);
+    for (uint8_t i = 6; i < MAX_GROUPES; i++)
+      memset(&somfy.groupes[i], 0, sizeof(GroupeConfig));
+    EEPROM.get(OLD_WIFI_OFS,      somfy.wifiSSID);
+    EEPROM.get(OLD_WIFI_PASS_OFS, somfy.wifiPass);
+    EEPROM.get(OLD_LAT_OFS,     somfy.latitude);
+    EEPROM.get(OLD_LAT_OFS + 4, somfy.longitude);
+    EEPROM.get(OLD_LAT_OFS + 8, somfy.ville);
+    somfy.appVersion = VERSION;
+    EEPROM.put(EEPROM_ADDRESS, somfy);
+    EEPROM.commit();
+
+  } else if (somfy.appVersion == 5) {
+    // Migration VERSION 5 → 7 : ajout lat/lon/ville + nouveaux slots volets/groupes
+    // Les offsets EEPROM de groupes/wifi ont changé → relecture directe
+    LOGLN(F("EEPROM migration v5->v7"));
+    memset(&somfy.volets[8], 0, sizeof(VoletConfig));
+    memset(&somfy.volets[9], 0, sizeof(VoletConfig));
+    for (uint8_t i = 0; i < 6; i++)
+      EEPROM.get(OLD_GROUPES_OFS + i * (int)sizeof(GroupeConfig), somfy.groupes[i]);
+    for (uint8_t i = 6; i < MAX_GROUPES; i++)
+      memset(&somfy.groupes[i], 0, sizeof(GroupeConfig));
+    EEPROM.get(OLD_WIFI_OFS,      somfy.wifiSSID);
+    EEPROM.get(OLD_WIFI_PASS_OFS, somfy.wifiPass);
     somfy.latitude  = LATITUDE;
     somfy.longitude = LONGITUDE;
     strncpy(somfy.ville, VILLE, sizeof(somfy.ville) - 1);
@@ -1540,8 +1581,15 @@ static void initEEPROM() {
     EEPROM.commit();
 
   } else if (somfy.appVersion == 4) {
-    // Migration VERSION 4 → 6 : ajout wifiSSID/wifiPass + latitude/longitude/ville
-    LOGLN(F("EEPROM migration v4->v6"));
+    // Migration VERSION 4 → 7 : ajout wifiSSID/wifiPass + lat/lon/ville + nouveaux slots
+    // v4 n'avait pas de WiFi en EEPROM → reset défauts ; groupes à relire depuis offset 348
+    LOGLN(F("EEPROM migration v4->v7"));
+    memset(&somfy.volets[8], 0, sizeof(VoletConfig));
+    memset(&somfy.volets[9], 0, sizeof(VoletConfig));
+    for (uint8_t i = 0; i < 6; i++)
+      EEPROM.get(OLD_GROUPES_OFS + i * (int)sizeof(GroupeConfig), somfy.groupes[i]);
+    for (uint8_t i = 6; i < MAX_GROUPES; i++)
+      memset(&somfy.groupes[i], 0, sizeof(GroupeConfig));
     strncpy(somfy.wifiSSID, WIFI_SSID_DEFAULT, sizeof(somfy.wifiSSID) - 1);
     somfy.wifiSSID[sizeof(somfy.wifiSSID) - 1] = '\0';
     strncpy(somfy.wifiPass, WIFI_PASS_DEFAULT, sizeof(somfy.wifiPass) - 1);
@@ -1555,8 +1603,8 @@ static void initEEPROM() {
     EEPROM.commit();
 
   } else if (somfy.appVersion == 3) {
-    // Migration VERSION 3 → 6 : ajout volets/groupes + wifiSSID/wifiPass + latitude/longitude/ville
-    LOGLN(F("EEPROM migration v3->v6"));
+    // Migration VERSION 3 → 7 : ajout volets/groupes + wifiSSID/wifiPass + lat/lon/ville
+    LOGLN(F("EEPROM migration v3->v7"));
     initDefaultVoletsGroupes();
     strncpy(somfy.wifiSSID, WIFI_SSID_DEFAULT, sizeof(somfy.wifiSSID) - 1);
     somfy.wifiSSID[sizeof(somfy.wifiSSID) - 1] = '\0';
@@ -1571,8 +1619,8 @@ static void initEEPROM() {
     EEPROM.commit();
 
   } else if (somfy.appVersion == 2) {
-    // Migration VERSION 2 → 6 : Scene agrandie (7→9 bytes) + wifiSSID/wifiPass + latitude/longitude/ville
-    LOGLN(F("EEPROM migration v2->v6"));
+    // Migration VERSION 2 → 7 : Scene agrandie (7→9 bytes) + wifiSSID/wifiPass + lat/lon/ville
+    LOGLN(F("EEPROM migration v2->v7"));
     struct OldScene { uint8_t hour, minute, days, targetType, targetId, cmd, enabled; };
     const int scenesBase = (int)sizeof(int) + 16 * (int)sizeof(Remote); // offset 100
     for (uint8_t i = 0; i < NB_SCENES; i++) {
@@ -1596,8 +1644,8 @@ static void initEEPROM() {
     EEPROM.commit();
 
   } else if (somfy.appVersion == 1) {
-    // Migration VERSION 1 → 6 : remoteIDs préservés + wifiSSID/wifiPass + latitude/longitude/ville
-    LOGLN(F("EEPROM migration v1->v6"));
+    // Migration VERSION 1 → 7 : remoteIDs préservés + wifiSSID/wifiPass + lat/lon/ville
+    LOGLN(F("EEPROM migration v1->v7"));
     for (uint8_t i = 0; i < NB_SCENES; i++) {
       somfy.scenes[i] = {0, 0, 0, 0, 0, STOP, 0, 0, 0};
     }
