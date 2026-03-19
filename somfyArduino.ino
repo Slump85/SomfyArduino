@@ -21,7 +21,7 @@
 
 #define EEPROM_ADDRESS 0
 #define EEPROM_SIZE 1024
-#define VERSION 5
+#define VERSION 6
 
 // =====================
 // Configuration OTA
@@ -216,7 +216,10 @@ struct Persist {
   GroupeConfig groupes[MAX_GROUPES]; // 138 bytes
   char         wifiSSID[33];         //  33 bytes
   char         wifiPass[64];         //  64 bytes
-  // Total : 583 bytes (< 1024)
+  float        latitude;             //   4 bytes
+  float        longitude;            //   4 bytes
+  char         ville[32];            //  32 bytes
+  // Total : 623 bytes (< 1024)
 };
 
 // =====================
@@ -380,10 +383,10 @@ static void computeSunTimes(time_t utcNow,
   if (EqT >  12.0f) EqT -= 24.0f;
   if (EqT < -12.0f) EqT += 24.0f;
 
-  float noonUTC = 12.0f - EqT - LONGITUDE / 15.0f;
+  float noonUTC = 12.0f - EqT - somfy.longitude / 15.0f;
 
-  float cosH = (sinf(-0.8333f * DEG_TO_RAD) - sinf(LATITUDE * DEG_TO_RAD) * sinDec)
-               / (cosf(LATITUDE * DEG_TO_RAD) * cosf(dec));
+  float cosH = (sinf(-0.8333f * DEG_TO_RAD) - sinf(somfy.latitude * DEG_TO_RAD) * sinDec)
+               / (cosf(somfy.latitude * DEG_TO_RAD) * cosf(dec));
   float H;
   if      (cosH <= -1.0f) H = 12.0f;  // soleil de minuit
   else if (cosH >=  1.0f) H =  0.0f;  // nuit polaire
@@ -857,6 +860,28 @@ static void handleSun() {
   server.send(200, "application/json", buf);
 }
 
+static void handleLocationGet() {
+  if (!ensureAuth()) return;
+  char buf[128];
+  snprintf(buf, sizeof(buf), "{\"ville\":\"%s\",\"lat\":%.6f,\"lon\":%.6f}",
+           somfy.ville, somfy.latitude, somfy.longitude);
+  server.send(200, "application/json", buf);
+}
+
+static void handleLocationPost() {
+  if (!ensureAuth()) return;
+  if (server.hasArg("lat"))   somfy.latitude  = server.arg("lat").toFloat();
+  if (server.hasArg("lon"))   somfy.longitude = server.arg("lon").toFloat();
+  if (server.hasArg("ville")) {
+    strncpy(somfy.ville, server.arg("ville").c_str(), sizeof(somfy.ville) - 1);
+    somfy.ville[sizeof(somfy.ville) - 1] = '\0';
+  }
+  sunCacheDay = 0xFF;  // Forcer recalcul lever/coucher
+  EEPROM.put(EEPROM_ADDRESS, somfy);
+  EEPROM.commit();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 static void handleScenePost() {
   if (!ensureAuth()) return;
 
@@ -1034,6 +1059,19 @@ hr{border:none;border-top:1px solid #eee;margin:12px 0}
     <button onclick="saveGroupeConfig()">Enregistrer</button>
   </div>
 </div>
+<h2>Localisation</h2>
+<div class="card">
+  <b>Ville et coordonnées GPS</b>
+  <div class="form-row">
+    <label>Ville
+      <input type="text" id="loc-ville" list="cities-list" placeholder="ex: Paris" oninput="onCityInput()">
+      <datalist id="cities-list"></datalist>
+    </label>
+    <label>Latitude <input type="number" id="loc-lat" step="0.0001" placeholder="ex: 48.8566"></label>
+    <label>Longitude <input type="number" id="loc-lon" step="0.0001" placeholder="ex: 2.3522"></label>
+    <button onclick="saveLocation()">Enregistrer</button>
+  </div>
+</div>
 </div><!-- /tab-config -->
 
 <script>
@@ -1041,6 +1079,98 @@ const DAY_NAMES=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
 const TRIGGER_LABELS=["","Lever","Coucher"];
 let statusData={volets:[],groupes:[]};
 let configData={volets:[],groupes:[]};
+let locationData={ville:"",lat:0,lon:0};
+
+const CITIES=[
+  {name:"Paris",lat:48.8566,lon:2.3522},
+  {name:"Marseille",lat:43.2965,lon:5.3698},
+  {name:"Lyon",lat:45.7640,lon:4.8357},
+  {name:"Toulouse",lat:43.6047,lon:1.4442},
+  {name:"Nice",lat:43.7102,lon:7.2620},
+  {name:"Nantes",lat:47.2184,lon:-1.5536},
+  {name:"Montpellier",lat:43.6119,lon:3.8772},
+  {name:"Strasbourg",lat:48.5734,lon:7.7521},
+  {name:"Bordeaux",lat:44.8378,lon:-0.5792},
+  {name:"Lille",lat:50.6292,lon:3.0573},
+  {name:"Rennes",lat:48.1173,lon:-1.6778},
+  {name:"Reims",lat:49.2583,lon:4.0317},
+  {name:"Le Havre",lat:49.4938,lon:0.1077},
+  {name:"Saint-Etienne",lat:45.4397,lon:4.3872},
+  {name:"Toulon",lat:43.1242,lon:5.9280},
+  {name:"Grenoble",lat:45.1885,lon:5.7245},
+  {name:"Dijon",lat:47.3220,lon:5.0415},
+  {name:"Angers",lat:47.4784,lon:-0.5632},
+  {name:"Nimes",lat:43.8367,lon:4.3601},
+  {name:"Aix-en-Provence",lat:43.5297,lon:5.4474},
+  {name:"Clermont-Ferrand",lat:45.7772,lon:3.0870},
+  {name:"Brest",lat:48.3904,lon:-4.4861},
+  {name:"Tours",lat:47.3941,lon:0.6848},
+  {name:"Amiens",lat:49.8942,lon:2.2957},
+  {name:"Limoges",lat:45.8336,lon:1.2611},
+  {name:"Annecy",lat:45.8992,lon:6.1294},
+  {name:"Perpignan",lat:42.6887,lon:2.8948},
+  {name:"Metz",lat:49.1193,lon:6.1757},
+  {name:"Besancon",lat:47.2380,lon:6.0243},
+  {name:"Boulogne-Billancourt",lat:48.8352,lon:2.2400},
+  {name:"Orleans",lat:47.9029,lon:1.9039},
+  {name:"Rouen",lat:49.4432,lon:1.0993},
+  {name:"Mulhouse",lat:47.7508,lon:7.3359},
+  {name:"Caen",lat:49.1829,lon:-0.3707},
+  {name:"Nancy",lat:48.6921,lon:6.1844},
+  {name:"Argenteuil",lat:48.9472,lon:2.2467},
+  {name:"Montreuil",lat:48.8638,lon:2.4483},
+  {name:"Avignon",lat:43.9493,lon:4.8059},
+  {name:"Pau",lat:43.2951,lon:-0.3708},
+  {name:"Poitiers",lat:46.5802,lon:0.3404},
+  {name:"La Rochelle",lat:46.1603,lon:-1.1511},
+  {name:"Colomiers",lat:43.6071,lon:1.3329},
+  {name:"Bayonne",lat:43.4929,lon:-1.4748},
+  {name:"Troyes",lat:48.2973,lon:4.0744},
+  {name:"Ajaccio",lat:41.9192,lon:8.7386},
+  {name:"Biarritz",lat:43.4832,lon:-1.5586},
+  {name:"Dunkerque",lat:51.0343,lon:2.3772},
+  {name:"Colmar",lat:48.0793,lon:7.3585},
+  {name:"Chambery",lat:45.5646,lon:5.9178},
+  {name:"Lorient",lat:47.7482,lon:-3.3702},
+  {name:"Quimper",lat:48.0000,lon:-4.1000},
+  {name:"Valence",lat:44.9334,lon:4.8924},
+  {name:"Vannes",lat:47.6559,lon:-2.7601},
+  {name:"Arles",lat:43.6767,lon:4.6278},
+  {name:"Bayeux",lat:49.2764,lon:-0.7031},
+  {name:"Chartres",lat:48.4469,lon:1.4890},
+  {name:"Auxerre",lat:47.7978,lon:3.5676},
+  {name:"Belfort",lat:47.6390,lon:6.8631},
+  {name:"Gap",lat:44.5594,lon:6.0795},
+  {name:"Montauban",lat:44.0181,lon:1.3553}
+];
+
+(function initCitiesList(){
+  const dl=document.getElementById("cities-list");
+  CITIES.forEach(c=>{
+    const o=document.createElement("option"); o.value=c.name; dl.appendChild(o);
+  });
+})();
+
+function onCityInput(){
+  const val=document.getElementById("loc-ville").value;
+  const city=CITIES.find(c=>c.name.toLowerCase()===val.toLowerCase());
+  if(city){
+    document.getElementById("loc-lat").value=city.lat;
+    document.getElementById("loc-lon").value=city.lon;
+  }
+}
+
+async function saveLocation(){
+  const ville=document.getElementById("loc-ville").value.trim();
+  const lat=document.getElementById("loc-lat").value;
+  const lon=document.getElementById("loc-lon").value;
+  if(!lat||!lon){alert("Veuillez renseigner latitude et longitude.");return;}
+  const p=new URLSearchParams({ville,lat,lon});
+  await api("/api/location?"+p.toString(),{method:"POST"});
+  locationData={ville,lat:parseFloat(lat),lon:parseFloat(lon)};
+  alert("Localisation enregistrée !");
+  await refresh();
+}
 
 async function api(path,opts){
   const r=await fetch(path,{cache:"no-store",...(opts||{})});
@@ -1210,6 +1340,13 @@ async function refreshConfig(){
   document.getElementById("vc-name").value="";
   document.getElementById("gc-name").value="";
   document.querySelectorAll(".gm").forEach(c=>c.checked=false);
+
+  // Pré-remplir les champs localisation
+  const loc=await api("/api/location");
+  locationData=loc;
+  document.getElementById("loc-ville").value=loc.ville;
+  document.getElementById("loc-lat").value=loc.lat;
+  document.getElementById("loc-lon").value=loc.lon;
 }
 
 async function saveVoletSlot(id){
@@ -1227,12 +1364,13 @@ async function toggleLed(){
   document.getElementById("btn-led").style.color=next?"green":"#aaa";
 }
 async function refresh(){
-  const [st,sun,led]=await Promise.all([api("/api/status"),api("/api/sun"),api("/api/led")]);
+  const [st,sun,led,loc]=await Promise.all([api("/api/status"),api("/api/sun"),api("/api/led"),api("/api/location")]);
   statusData=st;
+  locationData=loc;
   document.getElementById("btn-led").style.color=led.ledPower?"green":"#aaa";
   document.querySelector("#meta").innerHTML=
     "<small>IP: "+st.wifi.ip+" | RSSI: "+st.wifi.rssi+" dBm | "+st.time
-    +" | Colomiers : 🌅 Lever: "+sun.rise+" :: 🌙 Coucher: "+sun.set+"</small>";
+    +" | "+loc.ville+" : 🌅 Lever: "+sun.rise+" :: 🌙 Coucher: "+sun.set+"</small>";
 
   const g=document.querySelector("#groups"); g.innerHTML="";
   st.groupes.forEach(gr=>{
@@ -1390,32 +1528,51 @@ static void initEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(EEPROM_ADDRESS, somfy);
 
-  if (somfy.appVersion == 4) {
-    // Migration VERSION 4 → 5 : ajout wifiSSID/wifiPass en EEPROM
-    LOGLN(F("EEPROM migration v4->v5"));
+  if (somfy.appVersion == 5) {
+    // Migration VERSION 5 → 6 : ajout latitude/longitude/ville en EEPROM
+    LOGLN(F("EEPROM migration v5->v6"));
+    somfy.latitude  = LATITUDE;
+    somfy.longitude = LONGITUDE;
+    strncpy(somfy.ville, VILLE, sizeof(somfy.ville) - 1);
+    somfy.ville[sizeof(somfy.ville) - 1] = '\0';
+    somfy.appVersion = VERSION;
+    EEPROM.put(EEPROM_ADDRESS, somfy);
+    EEPROM.commit();
+
+  } else if (somfy.appVersion == 4) {
+    // Migration VERSION 4 → 6 : ajout wifiSSID/wifiPass + latitude/longitude/ville
+    LOGLN(F("EEPROM migration v4->v6"));
     strncpy(somfy.wifiSSID, WIFI_SSID_DEFAULT, sizeof(somfy.wifiSSID) - 1);
     somfy.wifiSSID[sizeof(somfy.wifiSSID) - 1] = '\0';
     strncpy(somfy.wifiPass, WIFI_PASS_DEFAULT, sizeof(somfy.wifiPass) - 1);
     somfy.wifiPass[sizeof(somfy.wifiPass) - 1] = '\0';
+    somfy.latitude  = LATITUDE;
+    somfy.longitude = LONGITUDE;
+    strncpy(somfy.ville, VILLE, sizeof(somfy.ville) - 1);
+    somfy.ville[sizeof(somfy.ville) - 1] = '\0';
     somfy.appVersion = VERSION;
     EEPROM.put(EEPROM_ADDRESS, somfy);
     EEPROM.commit();
 
   } else if (somfy.appVersion == 3) {
-    // Migration VERSION 3 → 5 : ajout volets/groupes + wifiSSID/wifiPass
-    LOGLN(F("EEPROM migration v3->v5"));
+    // Migration VERSION 3 → 6 : ajout volets/groupes + wifiSSID/wifiPass + latitude/longitude/ville
+    LOGLN(F("EEPROM migration v3->v6"));
     initDefaultVoletsGroupes();
     strncpy(somfy.wifiSSID, WIFI_SSID_DEFAULT, sizeof(somfy.wifiSSID) - 1);
     somfy.wifiSSID[sizeof(somfy.wifiSSID) - 1] = '\0';
     strncpy(somfy.wifiPass, WIFI_PASS_DEFAULT, sizeof(somfy.wifiPass) - 1);
     somfy.wifiPass[sizeof(somfy.wifiPass) - 1] = '\0';
+    somfy.latitude  = LATITUDE;
+    somfy.longitude = LONGITUDE;
+    strncpy(somfy.ville, VILLE, sizeof(somfy.ville) - 1);
+    somfy.ville[sizeof(somfy.ville) - 1] = '\0';
     somfy.appVersion = VERSION;
     EEPROM.put(EEPROM_ADDRESS, somfy);
     EEPROM.commit();
 
   } else if (somfy.appVersion == 2) {
-    // Migration VERSION 2 → 5 : Scene agrandie (7→9 bytes) + wifiSSID/wifiPass
-    LOGLN(F("EEPROM migration v2->v5"));
+    // Migration VERSION 2 → 6 : Scene agrandie (7→9 bytes) + wifiSSID/wifiPass + latitude/longitude/ville
+    LOGLN(F("EEPROM migration v2->v6"));
     struct OldScene { uint8_t hour, minute, days, targetType, targetId, cmd, enabled; };
     const int scenesBase = (int)sizeof(int) + 16 * (int)sizeof(Remote); // offset 100
     for (uint8_t i = 0; i < NB_SCENES; i++) {
@@ -1430,13 +1587,17 @@ static void initEEPROM() {
     somfy.wifiSSID[sizeof(somfy.wifiSSID) - 1] = '\0';
     strncpy(somfy.wifiPass, WIFI_PASS_DEFAULT, sizeof(somfy.wifiPass) - 1);
     somfy.wifiPass[sizeof(somfy.wifiPass) - 1] = '\0';
+    somfy.latitude  = LATITUDE;
+    somfy.longitude = LONGITUDE;
+    strncpy(somfy.ville, VILLE, sizeof(somfy.ville) - 1);
+    somfy.ville[sizeof(somfy.ville) - 1] = '\0';
     somfy.appVersion = VERSION;
     EEPROM.put(EEPROM_ADDRESS, somfy);
     EEPROM.commit();
 
   } else if (somfy.appVersion == 1) {
-    // Migration VERSION 1 → 5 : remoteIDs préservés + wifiSSID/wifiPass
-    LOGLN(F("EEPROM migration v1->v5"));
+    // Migration VERSION 1 → 6 : remoteIDs préservés + wifiSSID/wifiPass + latitude/longitude/ville
+    LOGLN(F("EEPROM migration v1->v6"));
     for (uint8_t i = 0; i < NB_SCENES; i++) {
       somfy.scenes[i] = {0, 0, 0, 0, 0, STOP, 0, 0, 0};
     }
@@ -1445,6 +1606,10 @@ static void initEEPROM() {
     somfy.wifiSSID[sizeof(somfy.wifiSSID) - 1] = '\0';
     strncpy(somfy.wifiPass, WIFI_PASS_DEFAULT, sizeof(somfy.wifiPass) - 1);
     somfy.wifiPass[sizeof(somfy.wifiPass) - 1] = '\0';
+    somfy.latitude  = LATITUDE;
+    somfy.longitude = LONGITUDE;
+    strncpy(somfy.ville, VILLE, sizeof(somfy.ville) - 1);
+    somfy.ville[sizeof(somfy.ville) - 1] = '\0';
     somfy.appVersion = VERSION;
     EEPROM.put(EEPROM_ADDRESS, somfy);
     EEPROM.commit();
@@ -1468,6 +1633,10 @@ static void initEEPROM() {
     somfy.wifiSSID[sizeof(somfy.wifiSSID) - 1] = '\0';
     strncpy(somfy.wifiPass, WIFI_PASS_DEFAULT, sizeof(somfy.wifiPass) - 1);
     somfy.wifiPass[sizeof(somfy.wifiPass) - 1] = '\0';
+    somfy.latitude  = LATITUDE;
+    somfy.longitude = LONGITUDE;
+    strncpy(somfy.ville, VILLE, sizeof(somfy.ville) - 1);
+    somfy.ville[sizeof(somfy.ville) - 1] = '\0';
 
     EEPROM.put(EEPROM_ADDRESS, somfy);
     EEPROM.commit();
@@ -1579,6 +1748,8 @@ static void initServer() {
   server.on("/api/scene",  HTTP_POST,   handleScenePost);
   server.on("/api/scene",  HTTP_DELETE, handleSceneDelete);
   server.on("/api/sun",             handleSun);
+  server.on("/api/location",  HTTP_GET,  handleLocationGet);
+  server.on("/api/location",  HTTP_POST, handleLocationPost);
   server.on("/api/volet-config",    handleVoletConfig);
   server.on("/api/groupe-config",   handleGroupeConfig);
   server.on("/api/led",             handleLedConfig);
